@@ -1,2 +1,1 @@
-# EmotionDetectionYoloX
-Emotion Detection using YoloX
+# Emotion_Detection
