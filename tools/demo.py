@@ -5,7 +5,7 @@
 from loguru import logger
 
 import cv2
-
+import numpy as np
 import torch
 
 from yolox.data.data_augment import preproc
@@ -16,6 +16,177 @@ from yolox.utils import fuse_model, get_model_info, postprocess, vis
 import argparse
 import os
 import time
+from numpy import random
+import cvzone
+
+
+palette = (2 ** 11 - 1, 2 ** 15 - 1, 2 ** 20 - 1)
+
+
+
+# Draws the disconnected Rectangle around the object
+def draw_disconnected_rect( img, pt1, pt2, color, thickness):
+    width = pt2[0] - pt1[0]
+    height = pt2[1] - pt1[1]
+    line_width = min(30, width // 3)
+    line_height = min(30, height // 3)
+    line_length = max(line_width, line_height)
+    cv2.line(img, pt1, (pt1[0] + line_length, pt1[1]), color, thickness)
+    cv2.line(img, pt1, (pt1[0], pt1[1] + line_length), color, thickness)
+    cv2.line(
+        img, (pt2[0] - line_length, pt1[1]), (pt2[0], pt1[1]), color, thickness
+    )
+    cv2.line(
+        img, (pt2[0], pt1[1]), (pt2[0], pt1[1] + line_length), color, thickness
+    )
+    cv2.line(
+        img, (pt1[0], pt2[1]), (pt1[0] + line_length, pt2[1]), color, thickness
+    )
+    cv2.line(
+        img, (pt1[0], pt2[1] - line_length), (pt1[0], pt2[1]), color, thickness
+    )
+    cv2.line(img, pt2, (pt2[0] - line_length, pt2[1]), color, thickness)
+    cv2.line(img, (pt2[0], pt2[1] - line_length), pt2, color, thickness)
+
+
+
+# Draws the shape of label component
+def draw_border(img, pt1, pt2, color, thickness, r, d):
+    x1,y1 = pt1
+    x2,y2 = pt2
+    # Top left
+    cv2.line(img, (x1 + r, y1), (x1 + r + d, y1), color, thickness)
+    cv2.line(img, (x1, y1 + r), (x1, y1 + r + d), color, thickness)
+    cv2.ellipse(img, (x1 + r, y1 + r), (r, r), 180, 0, 90, color, thickness)
+
+    # Top right
+    cv2.line(img, (x2 - r, y1), (x2 - r - d, y1), color, thickness)
+    cv2.line(img, (x2, y1 + r), (x2, y1 + r + d), color, thickness)
+    cv2.ellipse(img, (x2 - r, y1 + r), (r, r), 270, 0, 90, color, thickness)
+    # Bottom left
+    cv2.line(img, (x1 + r, y2), (x1 + r + d, y2), color, thickness)
+    cv2.line(img, (x1, y2 - r), (x1, y2 - r - d), color, thickness)
+    cv2.ellipse(img, (x1 + r, y2 - r), (r, r), 90, 0, 90, color, thickness)
+    # Bottom right
+    cv2.line(img, (x2 - r, y2), (x2 - r - d, y2), color, thickness)
+    cv2.line(img, (x2, y2 - r), (x2, y2 - r - d), color, thickness)
+    cv2.ellipse(img, (x2 - r, y2 - r), (r, r), 0, 0, 90, color, thickness)
+
+    cv2.rectangle(img, (x1 + r, y1), (x2 - r, y2), color, -1, cv2.LINE_AA)
+    cv2.rectangle(img, (x1, y1 + r), (x2, y2 - r - d), color, -1, cv2.LINE_AA)
+    
+    cv2.circle(img, (x1 +r, y1+r), 2, color, 12)
+    cv2.circle(img, (x2 -r, y1+r), 2, color, 12)
+    cv2.circle(img, (x1 +r, y2-r), 2, color, 12)
+    cv2.circle(img, (x2 -r, y2-r), 2, color, 12)    
+    return img
+
+# Implementing the label component
+def UI_box2(x, img, color=None,label=None,line_thickness=None, boundingbox = True):
+    # Plots one bounding box on image img
+    tl = line_thickness or round(0.30 * (img.shape[0] + img.shape[1]) / 2) + 1  # line/font thickness
+    color = color or [random.randint(0, 255) for _ in range(3)]
+    c1, c2 = (int(x[0]), int(x[1])), (int(x[2]), int(x[3]))
+    if boundingbox:
+        # cv2.rectangle(img, c1, c2, color, 2)
+        draw_disconnected_rect(img, c1, c2, color, tl)
+    if label:
+        tf = max(tl - 1, 1)  # font thickness
+        t_size = cv2.getTextSize(label, 0, fontScale=tl / 3, thickness=tf)[0]
+        img = draw_border(img, (c1[0], c1[1] - t_size[1] -3), (c1[0] + t_size[0], c1[1]+3), color, tf, 8, 2)
+        cv2.putText(img, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
+    # return img
+
+
+# Converting emojis to Frames
+def vid_to_frames(path):
+    frames = []
+    cap = cv2.VideoCapture(path)
+    ret = True
+    while ret:
+        ret, img = cap.read() # read one frame from the 'capture' object; img is (H, W, C)
+        if ret:
+            frames.append(img)
+    return frames
+
+# Emoji Dict to add more emojis make sure they follow naming conventions as per your labels
+# For this to wrok your custom trainig has to be done as mentioned in the lectures
+
+emojidict = dict(
+    happy = vid_to_frames('assets/happy.png'),
+    sad = vid_to_frames('assets/sad.png'),
+    surprised = vid_to_frames('assets/surprised.png')       
+    )
+
+current = None
+count = 0
+
+
+# Overlaying Image and Emoji
+def add_image(img, src2, x, y, ):
+    # x=  x+90
+    # y = y-10
+    w = 80
+    h = 80
+
+    initial = img[y:y+h,x:x+w]
+    src1 = initial
+    src2 = cv2.resize(src2, src1.shape[1::-1])
+    u_green = np.array([1, 1, 1])
+    l_green = np.array([0, 0, 0])
+    mask = cv2.inRange(src2, l_green, u_green)
+    res = cv2.bitwise_and(src2, src2, mask = mask)
+    f = src2 - res
+    f = np.where(f == 0, src1, f)
+    img[y:y+h,x:x+w] = f
+    return img
+
+def compute_color_for_labels(label):
+    """
+    Simple function that adds fixed color depending on the class
+    """
+    if label == 0: 
+        color = (85,45,255)
+    elif label == 1:
+        color = (222,82,175)
+    elif label == 2:
+        color = (0, 204, 255)
+    else:
+        color = [int((p * (label ** 2 - label + 1)) % 255) for p in palette]
+    return tuple(color)
+
+# Combining all the elements and returning the final image
+def vis2(img, boxes, scores, cls_ids, conf=0.5, class_names=None):
+
+    global current
+    global count
+
+    for i in range(len(boxes)):
+        box = boxes[i]
+        cls_id = int(cls_ids[i])
+        score = scores[i]
+        if score < conf:
+            continue
+        label = class_names[cls_id]
+        
+        UI_box2(box, img, color=compute_color_for_labels(cls_id),label=label,line_thickness=2)
+        if count == len(emojidict[label]):
+            count = 0 
+        if label == current:
+            count +=1
+        elif label != current:
+            count = 0 
+        width = int(box[0]) - int(box[0])
+        height = int(box[1]) - int(box[1])
+        try:
+            img = add_image(img, emojidict[label][count] ,int(box[0] + width/2), int(box[1]) )
+        except:
+            img = add_image(img, emojidict[label][0] ,int(box[0]), int(box[1]) )
+
+        current = label
+        
+    return img
+
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 
@@ -167,6 +338,7 @@ class Predictor(object):
         scores = output[:, 4] * output[:, 5]
 
         vis_res = vis(img, bboxes, scores, cls, cls_conf, self.cls_names)
+        
         return vis_res
 
 
